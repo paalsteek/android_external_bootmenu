@@ -24,6 +24,7 @@
 #include <linux/fb.h>
 #include <linux/kd.h>
 #include <pixelflinger/pixelflinger.h>
+#include <math.h>
 
 #if defined(PIXELS_BGRA)
 # define PIXEL_FORMAT GGL_PIXEL_FORMAT_BGRA_8888
@@ -43,26 +44,25 @@
 # define PIXEL_SIZE   2
 #endif
 
-#include "font_10x18.h"
+#define NUM_BUFFERS 2
+
 #include "minui.h"
+#include "font_10x18.h"
+#include "roboto_15x24.h"
 
 #include "../common.h"
 
-typedef struct {
-    GGLSurface texture;
-    unsigned cwidth;
-    unsigned cheight;
-    unsigned ascent;
-} GRFont;
 
-static GRFont *gr_font = NULL;
+static struct UiFont FONTS[3];
+static int selectedFont = FONT_HEAD;
 static GGLContext *gr_context = 0;
-static GGLSurface gr_font_texture;
-static GGLSurface gr_framebuffer[2];
+static GGLSurface gr_framebuffer[NUM_BUFFERS];
 static GGLSurface gr_mem_surface;
 static unsigned gr_active_fb = 0;
+static unsigned double_buffering = 0;
 
 static void * gr_fontmem = NULL;
+static void * gr_bigfontmem = NULL;
 static int gr_fb_fd = -1;
 static int gr_vt_fd = -1;
 
@@ -107,7 +107,7 @@ static int get_framebuffer(GGLSurface *fb)
     }
 
     vi.bits_per_pixel = PIXEL_SIZE * 8;
-    if (PIXEL_FORMAT == GGL_PIXEL_FORMAT_RGBA_8888 
+    if (PIXEL_FORMAT == GGL_PIXEL_FORMAT_RGBA_8888
      || PIXEL_FORMAT == GGL_PIXEL_FORMAT_RGBX_8888) {
       vi.red.offset     = 0;
       vi.red.length     = 8;
@@ -184,6 +184,12 @@ static int get_framebuffer(GGLSurface *fb)
 
     fb++;
 
+    /* check if we can use double buffering */
+    if (vi.yres * fi.line_length * NUM_BUFFERS > fi.smem_len)
+        return fd;
+
+    double_buffering = 1;
+
     fb->version = sizeof(*fb);
     fb->width = vi.xres;
     fb->height = vi.yres;
@@ -244,8 +250,8 @@ static void get_memory_surface(GGLSurface* ms) {
 
 static void set_active_framebuffer(unsigned n)
 {
-    if (n > 1) return;
-    vi.yres_virtual = vi.yres * 2;
+    if (n >= NUM_BUFFERS || !double_buffering) return;
+    vi.yres_virtual = vi.yres * NUM_BUFFERS;
     vi.yoffset = n * vi.yres;
     vi.bits_per_pixel = PIXEL_SIZE * 8;
     if (ioctl(gr_fb_fd, FBIOPUT_VSCREENINFO, &vi) < 0) {
@@ -273,7 +279,8 @@ void gr_flip(void)
     GGLContext *gl = gr_context;
 
     /* swap front and back buffers */
-    gr_active_fb = (gr_active_fb + 1) & 1;
+    if (double_buffering)
+        gr_active_fb = (gr_active_fb + 1) % NUM_BUFFERS;
 
     /* copy data from the in-memory surface to the buffer we're about
      * to make active. */
@@ -299,26 +306,37 @@ void gr_color(unsigned char r, unsigned char g, unsigned char b, unsigned char a
     gl->color4xv(gl, color);
 }
 
+void gr_set_uicolor(struct UiColor c) {
+    gr_color(c.r, c.g, c.b, c.a);
+}
+struct UiColor gr_make_uicolor(unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+    struct UiColor c = {r, g, b, a};
+    return c;
+}
+
 int gr_measure(const char *s)
 {
-    return gr_font->cwidth * strlen(s);
+    return FONTS[selectedFont].gr_font->cwidth * strlen(s);
 }
 
 void gr_font_size(int *x, int *y)
 {
-    if (gr_font != NULL) {
-        *x = gr_font->cwidth;
-        *y = gr_font->cheight;
+    if (FONTS[selectedFont].gr_font != NULL) {
+        *x = FONTS[selectedFont].gr_font->cwidth;
+        *y = FONTS[selectedFont].gr_font->cheight;
     }
 }
 
 int gr_text(int x, int y, const char *s)
 {
-    GGLContext *gl = gr_context;
-    GRFont *font = gr_font;
-    unsigned off;
+    return gr_text_cut(x,y,s,-1,-1,-1,-1);
+}
 
-    y -= font->ascent;
+int gr_text_cut(int _x, int _y, const char *s, int minx, int maxx, int miny, int maxy) {
+    GGLContext *gl = gr_context;
+    GRFont *font = FONTS[selectedFont].gr_font;
+    unsigned off;
+    _y -= font->ascent;
 
     gl->bindTexture(gl, &font->texture);
     gl->texEnvi(gl, GGL_TEXTURE_ENV, GGL_TEXTURE_ENV_MODE, GGL_REPLACE);
@@ -327,15 +345,47 @@ int gr_text(int x, int y, const char *s)
     gl->enable(gl, GGL_TEXTURE_2D);
 
     while((off = *s++)) {
-        off -= 32;
-        if (off < 96) {
-            gl->texCoord2i(gl, (off * font->cwidth) - x, 0 - y);
-            gl->recti(gl, x, y, x + font->cwidth, y + font->cheight);
+      off -= 32;
+      if (off < 96) {
+        int tex_diff_y = 0;
+        int tex_diff_x = 0;
+        int x = _x;
+        int y = _y;
+        int dwidth=font->cwidth;
+        int dheight=font->cheight;
+
+        if(minx>=0 && x<minx) {
+          tex_diff_x=minx-x;
+          dwidth-=minx-x;
+          x=minx;
         }
-        x += font->cwidth;
+
+        if(miny>=0 && y<miny) {
+          tex_diff_y=miny-y;
+          dheight-=miny-y;
+          y=miny;
+        }
+
+        gl->texCoord2i(gl, (off * font->cwidth) - x+tex_diff_x, 0 - y+tex_diff_y);
+
+        // maxx
+        if(maxx>=0 && (x+(int)font->cwidth)>maxx) {
+          dwidth-=((x+(int)font->cwidth)-maxx);
+          if(dwidth<0) dwidth=0;
+        }
+
+        // maxy
+        if(maxy>=0 && (y+(int)font->cheight)>maxy) {
+          dheight-=((y+(int)font->cheight)-maxy);
+          if(dheight<0) dheight=0;
+        }
+
+        gl->recti(gl, x, y, x + dwidth, y + dheight);
+      }
+      _x += font->cwidth;
     }
 
-    return x;
+    return _x;
 }
 
 void gr_fill(int x, int y, int w, int h)
@@ -343,6 +393,24 @@ void gr_fill(int x, int y, int w, int h)
     GGLContext *gl = gr_context;
     gl->disable(gl, GGL_TEXTURE_2D);
     gl->recti(gl, x, y, w, h);
+}
+
+void gr_drawLine(int ax, int ay, int bx, int by, int width)
+{
+    GGLContext *gl = gr_context;
+    gl->disable(gl, GGL_TEXTURE_2D);
+
+    int v0[] = {ax*16,ay*16};
+    int v1[] = {bx*16,by*16};
+    gl->linex(gl, v0, v1, width*16);
+}
+
+void gr_drawRect(int ax, int ay, int bx, int by, int width)
+{
+    gr_drawLine(ax, ay, bx, ay, width); //top
+    gr_drawLine(bx-abs(width/2)-((width % 2)?1:0), ay, bx-abs(width/2)-((width % 2)?1:0), by, width); //right
+    gr_drawLine(bx, by-abs(width/2), ax, by-abs(width/2), width); //bottom
+    gr_drawLine(ax+abs(width/2), by, ax+abs(width/2), ay, width); //left
 }
 
 void gr_blit(gr_surface source, int sx, int sy, int w, int h, int dx, int dy) {
@@ -374,44 +442,63 @@ unsigned int gr_get_height(gr_surface surface) {
     return ((GGLSurface*) surface)->height;
 }
 
-static void gr_init_font(void)
+static struct UiFont gr_init_font(struct CFont *font_p)
 {
+    struct UiFont uifont;
     GGLSurface *ftex;
     unsigned char *bits, *rle;
     unsigned char *in, data;
+    int i;
 
-    gr_font = calloc(sizeof(*gr_font), 1);
-    ftex = &gr_font->texture;
+    uifont.gr_font = calloc(sizeof(*uifont.gr_font), 1);
+    uifont.cfont = font_p;
+    ftex = &uifont.gr_font->texture;
 
-    bits = malloc(font.width * font.height);
-    gr_fontmem = (void *) bits;
+    bits = malloc(font_p->width * font_p->height);
+    uifont.gr_fontmem = (void *) bits;
 
     ftex->version = sizeof(*ftex);
-    ftex->width = font.width;
-    ftex->height = font.height;
-    ftex->stride = font.width;
+    ftex->width = font_p->width;
+    ftex->height = font_p->height;
+    ftex->stride = font_p->width;
     ftex->data = (void*) bits;
     ftex->format = GGL_PIXEL_FORMAT_A_8;
 
-    in = font.rundata;
+    in = font_p->rundata;
     while((data = *in++)) {
         memset(bits, (data & 0x80) ? 255 : 0, data & 0x7f);
         bits += (data & 0x7f);
     }
 
-    gr_font->cwidth = font.cwidth;
-    gr_font->cheight = font.cheight;
-    gr_font->ascent = font.cheight - 2;
+    uifont.gr_font->cwidth = font_p->cwidth;
+    uifont.gr_font->cheight = font_p->cheight;
+    uifont.gr_font->ascent = font_p->cheight - 2;
+
+    return uifont;
 }
 
-static void gr_free_font(void)
+static void gr_init_fonts(void)
+{
+    FONTS[FONT_HEAD] = gr_init_font(&bigfont);
+    FONTS[FONT_ITEM] = gr_init_font(&bigfont);
+    FONTS[FONT_LOGS] = gr_init_font(&font);
+}
+
+static void gr_free_font(struct UiFont *uifont)
 {
     // free font allocs
-    if (gr_fontmem) free(gr_fontmem);
-    gr_fontmem = NULL;
+    if (uifont->gr_fontmem) free(uifont->gr_fontmem);
+    uifont->gr_fontmem = NULL;
 
-    if (gr_font) free(gr_font);
-    gr_font = NULL;
+    if (uifont->gr_font) free(uifont->gr_font);
+    uifont->gr_font = NULL;
+}
+
+static void gr_free_fonts(void)
+{
+    gr_free_font(&FONTS[FONT_HEAD]);
+    gr_free_font(&FONTS[FONT_ITEM]);
+    gr_free_font(&FONTS[FONT_LOGS]);
 }
 
 int gr_init(void)
@@ -421,21 +508,21 @@ int gr_init(void)
 
     gr_mem_surface.data = NULL;
 
-    gr_init_font();
+    gr_init_fonts();
     gr_vt_fd = open("/dev/tty0", O_RDWR | O_SYNC);
     if (gr_vt_fd < 0) {
         gr_vt_fd = open("/dev/tty", O_RDWR | O_SYNC);
     }
     if (gr_vt_fd < 0) {
         // This is non-fatal; post-Cupcake kernels don't have tty0.
-        perror("can't open /dev/tty0");
+        perror("can't open /dev/tty");
     } else {
         ioctl(gr_vt_fd, KDGETMODE, &gr_vt_mode);
         if (ioctl(gr_vt_fd, KDSETMODE, (void*) KD_GRAPHICS)) {
             // However, if we do open tty0, we expect the ioctl to work.
-            perror("failed KDSETMODE to KD_GRAPHICS on tty0");
-            gr_exit();
-            return -1;
+            perror("failed KDSETMODE to KD_GRAPHICS on tty");
+            //gr_exit();
+            //return -1;
         }
     }
 
@@ -491,7 +578,7 @@ void gr_exit(void)
         gr_mem_surface.data = NULL;
     }
 
-    gr_free_font();
+    gr_free_fonts();
 
     // un-mmap
     release_framebuffer(gr_framebuffer);
@@ -523,3 +610,18 @@ void gr_fb_blank(bool blank)
         perror("ioctl(): blank");
 }
 
+void gr_setfont(int i) {
+    selectedFont = i;
+}
+
+int gr_getfont_cwidth() {
+    return FONTS[selectedFont].gr_font->cwidth;
+}
+
+int gr_getfont_cheight() {
+    return FONTS[selectedFont].gr_font->cheight;
+}
+
+int gr_getfont_cheightfix() {
+    return FONTS[selectedFont].cfont->cheightfix;
+}

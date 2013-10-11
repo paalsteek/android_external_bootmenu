@@ -16,6 +16,10 @@
 
 #ifndef _RECOVERY_UI_H
 #define _RECOVERY_UI_H
+#include "common.h"
+#include <sys/time.h>
+#include <sys/types.h>
+#include <linux/types.h>
 
 // Called when recovery starts up.  Returns 0.
 extern int device_recovery_start();
@@ -65,15 +69,28 @@ int device_wipe_data();
 #define HIGHLIGHT_DOWN      -3
 #define SELECT_ITEM         -4
 #define ACTION_CANCEL       -5
+#define ACTION_NEXTTAB      -6
 
 #define GO_BACK            127
 
 // Header text to display above the main menu.
 extern char* MENU_HEADERS[];
+extern char* TABS[];
 
 // Menus title
 char** prepend_title(const char** headers);
 void free_menu_headers(char** headers);
-int get_menu_selection(char** headers, char** items, int menu_only, int initial_selection);
+struct UiMenuResult get_menu_selection(char** headers, char** tabs, struct UiMenuItem* items, int menu_only, int initial_selection);
+static void recalcSquare();
+void ui_get_time(char* result);
+void ui_get_usbstate(char* result);
+static int drawTab(int left, const char* s, int active);
+void ui_set_activeTab(int i);
+int ui_setTab_next();
+int ui_inside_menuitem(int item, int x, int y);
+int timeval_subtract(struct timeval *result, struct timeval *t2, struct timeval *t1);
+struct ui_touchresult ui_handle_touch(struct ui_input_event uev);
+void enableMenuSelection(int i);
+int is_menuSelection_enabled();
 
 #endif

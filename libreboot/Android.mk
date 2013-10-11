@@ -2,10 +2,49 @@ ifeq ($(BOARD_USES_BOOTMENU),true)
 
 LOCAL_PATH := $(call my-dir)
 
+# build device static library
+include $(CLEAR_VARS)
+
+LOCAL_SRC_FILES:= \
+	reboot.c
+
+ifneq ($(BOARD_BOOTMENU_REBOOT_HOOK),)
+LOCAL_CFLAGS += -DBOARD_REBOOT_HOOK
+LOCAL_SRC_FILES += $(BOARD_BOOTMENU_REBOOT_HOOK)
+endif
+
+LOCAL_MODULE:= libreboot
+
+include $(BUILD_STATIC_LIBRARY)
+
+
+# build device static library
+include $(CLEAR_VARS)
+
+LOCAL_SRC_FILES:= \
+	reboot.c
+
+LOCAL_MODULE:= librebootrecovery
+
+ifneq ($(BOARD_BOOTMENU_REBOOT_HOOK),)
+LOCAL_CFLAGS += -DUSE_BOARD_REBOOT_HOOK
+LOCAL_SRC_FILES += $(BOARD_BOOTMENU_REBOOT_HOOK)
+endif
+
+LOCAL_CFLAGS += -DRECOVERY_SHELL
+LOCAL_STATIC_LIBRARIES += libcrecovery
+
+include $(BUILD_STATIC_LIBRARY)
+
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES := main.c reboot.c
 LOCAL_CFLAGS := -DSINGLE_APPLET=1
+
+ifneq ($(BOARD_BOOTMENU_REBOOT_HOOK),)
+LOCAL_CFLAGS += -DBOARD_REBOOT_HOOK
+LOCAL_SRC_FILES += $(BOARD_BOOTMENU_REBOOT_HOOK)
+endif
 
 LOCAL_MODULE := reboot_bm
 LOCAL_MODULE_STEM := reboot
@@ -18,4 +57,4 @@ LOCAL_MODULE_PATH := $(PRODUCT_OUT)/system/bootmenu/binary
 
 include $(BUILD_EXECUTABLE)
 
-endif # bootmenu
+endif # BOARD_USES_BOOTMENU
